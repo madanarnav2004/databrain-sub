@@ -1,0 +1,149 @@
+version: 1
+model: harbor
+
+entities:
+  tenants:
+    source: tenants
+    grain: one row per tenant
+    key: id
+  properties:
+    source: properties
+    grain: one row per property
+    key: id
+  units:
+    source: units
+    grain: one row per unit
+    key: id
+  leases:
+    source: leases
+    grain: one row per lease record
+    key: id
+  jobs:
+    source: jobs
+    grain: one row per job
+    key: id
+  job_costs:
+    source: job_costs
+    grain: one row per job cost record
+    key: id
+  occupancy_official:
+    source: occupancy_official
+    grain: one row per tenant and snapshot date
+    key: id
+
+relationship_policy: listed_only
+relationships:
+  - { from: properties, to: tenants, type: many_to_one, on: "properties.tenant_id = tenants.id" }
+  - { from: units, to: properties, type: many_to_one, on: "units.property_id = properties.id" }
+  - { from: leases, to: units, type: many_to_one, on: "leases.unit_id = units.id" }
+  - { from: jobs, to: properties, type: many_to_one, on: "jobs.property_id = properties.id" }
+  - { from: job_costs, to: jobs, type: many_to_one, on: "job_costs.job_id = jobs.id" }
+  - { from: occupancy_official, to: tenants, type: many_to_one, on: "occupancy_official.tenant_id = tenants.id" }
+
+filters:
+  rentable_unit: "units.is_common_area = 0"
+  live_occupied_unit: "units.is_common_area = 0 AND units.status = 'occupied'"
+  vacant_unit: "units.is_common_area = 0 AND units.status = 'vacant'"
+  harbor_open_job: >-
+    jobs.stage NOT IN ('Cancelled', 'Closed')
+    AND jobs.job_status <> 'Rejected'
+    AND jobs.is_active = 1
+    AND properties.is_active = 1
+    AND properties.active = 1
+  approved_invoice: "job_costs.type = 'Invoice' AND job_costs.status = 'Approved'"
+  not_yet_invoiced_job: >-
+    NOT EXISTS (
+      SELECT 1 FROM job_costs
+      WHERE job_costs.job_id = jobs.id
+        AND job_costs.type = 'Invoice'
+        AND job_costs.status = 'Approved'
+    )
+
+measures:
+  in_place_rent:
+    class: A
+    entity: units
+    aggregate: sum
+    field: units.market_rent
+    filters: [rentable_unit]
+    grain_policy: unit_only
+  rentable_units:
+    class: A
+    entity: units
+    aggregate: count
+    field: units.id
+    filters: [rentable_unit]
+  live_occupied_units:
+    class: A
+    entity: units
+    aggregate: count
+    field: units.id
+    filters: [live_occupied_unit]
+  vacant_units:
+    class: A
+    entity: units
+    aggregate: count
+    field: units.id
+    filters: [vacant_unit]
+  official_occupied_units:
+    class: D
+    entity: occupancy_official
+    aggregate: select_value
+    field: occupancy_official.occupied_units
+    select: latest_by(occupancy_official.as_of)
+  harbor_open_jobs:
+    class: A
+    entity: jobs
+    aggregate: count
+    field: jobs.id
+    filters: [harbor_open_job]
+  not_yet_invoiced_jobs:
+    class: A
+    entity: jobs
+    aggregate: count
+    field: jobs.id
+    filters: [not_yet_invoiced_job]
+  approved_invoice_spend:
+    class: A
+    entity: job_costs
+    aggregate: sum
+    field: job_costs.total
+    filters: [approved_invoice]
+  target_job_cost:
+    class: A
+    entity: jobs
+    aggregate: sum
+    field: jobs.target_job_cost
+  live_occupancy_rate:
+    class: B
+    type: ratio
+    numerator: live_occupied_units
+    denominator: rentable_units
+
+grain_guards:
+  in_place_rent:
+    forbid_join: leases
+    on_violation: grain_error
+
+principal_bindings:
+  northline_embed:
+    principal: { surface: embed, tenant: northline }
+    occupancy: official_occupied_units
+    open_jobs: harbor_open_jobs
+  cedar_embed:
+    principal: { surface: embed, tenant: cedar }
+    occupancy: live_occupied_units
+    occupancy_rate: live_occupancy_rate
+    open_jobs: not_yet_invoiced_jobs
+
+access:
+  - effect: deny
+    principal: { surface: embed, tenant: cedar }
+    objects: [jobs.target_job_cost, target_job_cost]
+
+verified_queries:
+  occupancy_over_time:
+    class: C
+    description: Monthly occupancy for the last 12 months.
+    execution: retrieve_registered_sql
+    sql: external
