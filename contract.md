@@ -36,7 +36,7 @@ Embed example: the request `{"kind":"measure","name":"occupancy"}` is paired wit
 actor: cedar_owner_guest
 surface: embed
 tenant_scope: cedar
-isolation: { kind: schema, schema: cedar_prod }
+isolation: { kind: schema }
 bindings: { occupancy: live_occupied_units, open_jobs: not_yet_invoiced_jobs }
 denied: [jobs.target_job_cost, target_job_cost]
 ```
@@ -47,7 +47,7 @@ Studio example: the same tenant-free request is paired with this Principal and r
 actor: priya@harbor
 surface: studio
 tenant_scope: northline
-isolation: { kind: row_filter, field: tenants.id, value: 1 }
+isolation: { kind: row_filter, trusted_tenant: northline }
 bindings: { occupancy: official_occupied_units, open_jobs: harbor_open_jobs }
 denied: []
 ```
@@ -56,8 +56,8 @@ The Cedar target-cost restriction applies only to its embed Principal. An author
 
 ## Isolation
 
-- **Row filter:** the Principal supplies a trusted tenant value. The resolver injects the tenant predicate into every applicable source before SQL runs. This is how the SQLite seed represents both tenants.
-- **Schema/catalog rewrite:** the Principal supplies an approved physical namespace. The resolver rewrites model sources into that namespace; the request cannot name or override it. Cedar production uses this form, with tenant facts in its tenant schema and shared dimensions in approved shared schemas such as `public`.
+- **Row filter:** the Principal supplies a trusted tenant. The resolver uses the model relationships to enforce that tenant on every applicable source; it does not assume every table has the same tenant column. This is how the SQLite seed represents both tenants.
+- **Schema/catalog rewrite:** the Principal supplies an approved physical namespace mapping. The resolver rewrites model sources through that mapping; the request cannot name or override a schema or catalog. Cedar production uses this form.
 
 Any tenant id, slug, schema, or catalog found in a request is rejected rather than treated as a normal filter.
 
