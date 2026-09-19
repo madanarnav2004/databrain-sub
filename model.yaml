@@ -123,7 +123,7 @@ measures:
 grain_guards:
   in_place_rent:
     forbid_join: leases
-    on_violation: grain_error
+    on_violation: grain
 
 principal_bindings:
   northline_embed:
@@ -138,7 +138,7 @@ principal_bindings:
 
 access:
   - effect: deny
-    principal: { surface: embed, tenant: cedar }
+    principal: { surface: embed, tenant: cedar } # Cedar Studio is not denied.
     objects: [jobs.target_job_cost, target_job_cost]
 
 verified_queries:
