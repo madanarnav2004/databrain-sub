@@ -1,3 +1,5 @@
+-- Model object: in_place_rent
+-- Expected result: 200
 SELECT SUM(units.market_rent) AS result
 FROM units
 JOIN properties ON units.property_id = properties.id

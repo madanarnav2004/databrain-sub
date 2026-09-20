@@ -1,3 +1,5 @@
+-- Model object: harbor_open_jobs
+-- Expected result: 2
 SELECT COUNT(jobs.id) AS result
 FROM jobs
 JOIN properties ON jobs.property_id = properties.id

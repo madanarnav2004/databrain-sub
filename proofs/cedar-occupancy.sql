@@ -1,3 +1,5 @@
+-- Model object: live_occupied_units
+-- Expected result: 2
 SELECT COUNT(units.id) AS result
 FROM units
 JOIN properties ON units.property_id = properties.id

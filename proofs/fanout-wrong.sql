@@ -1,3 +1,5 @@
+-- Intentional bug demonstration for model object: in_place_rent
+-- Expected incorrect result: 600; a real plan must fail with grain
 SELECT SUM(units.market_rent) AS result
 FROM units
 JOIN leases ON leases.unit_id = units.id
