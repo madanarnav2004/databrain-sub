@@ -1,63 +1,132 @@
+# Harbor semantic model. Business definitions come from the locked taxonomy.md.
 version: 1
 model: harbor
+taxonomy: taxonomy.md
+
+runtime_policy:
+  relationship_policy: listed_only
+  unlisted_relationship: grain
+  reverse_relationship_traversal: measure_allowlist_only
+  unresolved_binding: unauthorized
+  missing_required_source_value: unavailable
+  access_default: deny
 
 entities:
   tenants:
     source: tenants
-    grain: one row per tenant
-    key: id
+    grain: one row per Harbor tenant
+    primary_key: [id]
+    tenant_scope: self
+
   properties:
     source: properties
     grain: one row per property
-    key: id
+    primary_key: [id]
+    tenant_scope: [properties_to_tenants]
+
   units:
     source: units
-    grain: one row per unit
-    key: id
+    grain: one row per unit record
+    primary_key: [id]
+    tenant_scope: [units_to_properties, properties_to_tenants]
+
   leases:
     source: leases
-    grain: one row per lease record
-    key: id
+    grain: one row per current or historical lease record
+    primary_key: [id]
+    tenant_scope: [leases_to_units, units_to_properties, properties_to_tenants]
+
   jobs:
     source: jobs
     grain: one row per job
-    key: id
+    primary_key: [id]
+    tenant_scope: [jobs_to_properties, properties_to_tenants]
+
   job_costs:
     source: job_costs
     grain: one row per job cost record
-    key: id
+    primary_key: [id]
+    tenant_scope: [job_costs_to_jobs, jobs_to_properties, properties_to_tenants]
+
   occupancy_official:
     source: occupancy_official
-    grain: one row per tenant and snapshot date
-    key: id
+    grain: one row per tenant and reporting period
+    primary_key: [id]
+    unique_by: [tenant_id, as_of]
+    source_contract: every row is a signed, published admin snapshot
+    tenant_scope: [occupancy_official_to_tenants]
 
-relationship_policy: listed_only
+# Only these relationships may be planned. Traversal from the many side to the
+# one side preserves grain; reverse traversal can fan out and requires an
+# explicit measure-level allowance.
 relationships:
-  - { from: properties, to: tenants, type: many_to_one, on: "properties.tenant_id = tenants.id" }
-  - { from: units, to: properties, type: many_to_one, on: "units.property_id = properties.id" }
-  - { from: leases, to: units, type: many_to_one, on: "leases.unit_id = units.id" }
-  - { from: jobs, to: properties, type: many_to_one, on: "jobs.property_id = properties.id" }
-  - { from: job_costs, to: jobs, type: many_to_one, on: "job_costs.job_id = jobs.id" }
-  - { from: occupancy_official, to: tenants, type: many_to_one, on: "occupancy_official.tenant_id = tenants.id" }
+  properties_to_tenants:
+    from: properties.tenant_id
+    to: tenants.id
+    cardinality: many_to_one
+
+  units_to_properties:
+    from: units.property_id
+    to: properties.id
+    cardinality: many_to_one
+
+  leases_to_units:
+    from: leases.unit_id
+    to: units.id
+    cardinality: many_to_one
+
+  jobs_to_properties:
+    from: jobs.property_id
+    to: properties.id
+    cardinality: many_to_one
+
+  job_costs_to_jobs:
+    from: job_costs.job_id
+    to: jobs.id
+    cardinality: many_to_one
+
+  occupancy_official_to_tenants:
+    from: occupancy_official.tenant_id
+    to: tenants.id
+    cardinality: many_to_one
 
 filters:
-  rentable_unit: "units.is_common_area = 0"
-  live_occupied_unit: "units.is_common_area = 0 AND units.status = 'occupied'"
-  vacant_unit: "units.is_common_area = 0 AND units.status = 'vacant'"
-  harbor_open_job: >-
-    jobs.stage NOT IN ('Cancelled', 'Closed')
-    AND jobs.job_status <> 'Rejected'
-    AND jobs.is_active = 1
-    AND properties.is_active = 1
-    AND properties.active = 1
-  approved_invoice: "job_costs.type = 'Invoice' AND job_costs.status = 'Approved'"
-  not_yet_invoiced_job: >-
-    NOT EXISTS (
-      SELECT 1 FROM job_costs
-      WHERE job_costs.job_id = jobs.id
-        AND job_costs.type = 'Invoice'
-        AND job_costs.status = 'Approved'
-    )
+  rentable_unit:
+    entity: units
+    predicate: "units.is_common_area = 0"
+
+  live_occupied_unit:
+    entity: units
+    predicate: "units.is_common_area = 0 AND units.status = 'occupied'"
+
+  vacant_unit:
+    entity: units
+    predicate: "units.is_common_area = 0 AND units.status = 'vacant'"
+
+  harbor_open_job:
+    entity: jobs
+    requires_relationships: [jobs_to_properties]
+    predicate: >-
+      jobs.stage NOT IN ('Cancelled', 'Closed')
+      AND jobs.job_status <> 'Rejected'
+      AND jobs.is_active = 1
+      AND properties.is_active = 1
+      AND properties.active = 1
+
+  approved_invoice:
+    entity: job_costs
+    predicate: "job_costs.type = 'Invoice' AND job_costs.status = 'Approved'"
+
+  not_yet_invoiced_job:
+    entity: jobs
+    predicate: >-
+      NOT EXISTS (
+        SELECT 1
+        FROM job_costs
+        WHERE job_costs.job_id = jobs.id
+          AND job_costs.type = 'Invoice'
+          AND job_costs.status = 'Approved'
+      )
 
 measures:
   in_place_rent:
@@ -66,84 +135,218 @@ measures:
     aggregate: sum
     field: units.market_rent
     filters: [rentable_unit]
-    grain_policy: unit_only
+    grain_contract:
+      grain: unit
+      allowed_relationships: [units_to_properties, properties_to_tenants]
+      forbidden_entities: [leases]
+      on_violation: grain
+
   rentable_units:
     class: A
     entity: units
     aggregate: count
     field: units.id
     filters: [rentable_unit]
+    grain_contract:
+      grain: unit
+      allowed_relationships: [units_to_properties, properties_to_tenants]
+
   live_occupied_units:
     class: A
     entity: units
     aggregate: count
     field: units.id
     filters: [live_occupied_unit]
+    grain_contract:
+      grain: unit
+      allowed_relationships: [units_to_properties, properties_to_tenants]
+
   vacant_units:
     class: A
     entity: units
     aggregate: count
     field: units.id
     filters: [vacant_unit]
-  official_occupied_units:
-    class: D
-    entity: occupancy_official
-    aggregate: select_value
-    field: occupancy_official.occupied_units
-    select: latest_by(occupancy_official.as_of)
+    grain_contract:
+      grain: unit
+      allowed_relationships: [units_to_properties, properties_to_tenants]
+
   harbor_open_jobs:
     class: A
     entity: jobs
     aggregate: count
     field: jobs.id
     filters: [harbor_open_job]
+    grain_contract:
+      grain: job
+      allowed_relationships: [jobs_to_properties, properties_to_tenants]
+
   not_yet_invoiced_jobs:
     class: A
     entity: jobs
     aggregate: count
     field: jobs.id
     filters: [not_yet_invoiced_job]
+    grain_contract:
+      grain: job
+      allowed_relationships: [jobs_to_properties, properties_to_tenants]
+
   approved_invoice_spend:
     class: A
     entity: job_costs
     aggregate: sum
     field: job_costs.total
     filters: [approved_invoice]
+    grain_contract:
+      grain: job_cost
+      allowed_relationships:
+        [job_costs_to_jobs, jobs_to_properties, properties_to_tenants]
+
   target_job_cost:
     class: A
     entity: jobs
     aggregate: sum
     field: jobs.target_job_cost
+    semantic_role: estimate
+    grain_contract:
+      grain: job
+      allowed_relationships: [jobs_to_properties, properties_to_tenants]
+
   live_occupancy_rate:
     class: B
-    type: ratio
+    derive: safe_divide(live_occupied_units, rentable_units)
     numerator: live_occupied_units
     denominator: rentable_units
+    zero_denominator: null
 
-grain_guards:
-  in_place_rent:
-    forbid_join: leases
-    on_violation: grain
+  official_occupied_units:
+    class: D
+    entity: occupancy_official
+    aggregate: select_value
+    field: occupancy_official.occupied_units
+    snapshot:
+      period_field: occupancy_official.as_of
+      reporting_period_source: trusted_execution_context
+      selection: exact_reporting_period
+      require_one_row: true
+      allow_prior_period_fallback: false
+      allow_unit_derived_fallback: false
+      on_missing: unavailable
+    grain_contract:
+      grain: tenant_reporting_period
+      allowed_relationships: [occupancy_official_to_tenants]
+      forbidden_dimensions: [property, unit, lease]
+      on_violation: grain
 
-principal_bindings:
-  northline_embed:
-    principal: { surface: embed, tenant: northline }
-    occupancy: official_occupied_units
-    open_jobs: harbor_open_jobs
-  cedar_embed:
-    principal: { surface: embed, tenant: cedar }
-    occupancy: live_occupied_units
-    occupancy_rate: live_occupancy_rate
-    open_jobs: not_yet_invoiced_jobs
+# Plans use these stable business names. Their implementations are selected by
+# data-driven Principal bindings, never by tenant conditionals in the runtime.
+business_metrics:
+  occupancy:
+    kind: bound_measure
+    allowed_implementations: [official_occupied_units, live_occupied_units]
+  open_jobs:
+    kind: bound_measure
+    allowed_implementations: [harbor_open_jobs, not_yet_invoiced_jobs]
+
+semantic_profiles:
+  northline_reporting:
+    bindings:
+      occupancy: official_occupied_units
+      open_jobs: harbor_open_jobs
+    requestable:
+      - occupancy
+      - open_jobs
+      - in_place_rent
+      - approved_invoice_spend
+      - target_job_cost
+      - occupancy_over_time
+
+  cedar_reporting:
+    bindings:
+      occupancy: live_occupied_units
+      open_jobs: not_yet_invoiced_jobs
+    requestable:
+      - occupancy
+      - open_jobs
+      - live_occupied_units
+      - vacant_units
+      - rentable_units
+      - live_occupancy_rate
+      - in_place_rent
+      - approved_invoice_spend
+      - occupancy_over_time
+
+tenant_profile_assignments:
+  northline: northline_reporting
+  cedar: cedar_reporting
+
+principal_factories:
+  embed:
+    authentication: verified_guest_token
+    tenant_scope_source: token
+    semantic_profile_source: tenant_profile_assignment
+    request_tenant_selectors: forbidden
+
+  studio:
+    authentication: verified_harbor_session
+    tenant_scope_source: authorized_studio_context
+    semantic_profile_source: tenant_profile_assignment
+    request_tenant_selectors: forbidden
+
+isolation:
+  request_forbidden_selectors:
+    [tenant, tenant_id, tenant_slug, schema, catalog, database]
+  strategies:
+    row_filter:
+      scope_source: principal
+      root_entity: tenants
+      predicate: "tenants.slug = :principal_tenant_slug"
+      paths: entity.tenant_scope
+    schema_or_catalog_rewrite:
+      namespace_map_source: principal
+      logical_sources_only_in_plan: true
+  on_missing_scope: unauthorized
+  on_scope_override: isolated
+  on_unenforceable_scope: isolated
 
 access:
-  - effect: deny
-    principal: { surface: embed, tenant: cedar } # Cedar Studio is not denied.
-    objects: [jobs.target_job_cost, target_job_cost]
+  deny_precedence: true
+  rules:
+    - id: scoped_principal_can_request_profile_objects
+      effect: allow
+      principal:
+        authenticated: true
+        tenant_scope: required
+      objects: semantic_profile.requestable
+
+    - id: cedar_embed_cannot_view_estimates
+      effect: deny
+      principal:
+        surface: embed
+        tenant_profile: cedar_reporting
+      objects: [jobs.target_job_cost, target_job_cost]
+      error: denied
+
+    - id: studio_estimates_require_permission
+      effect: allow
+      principal:
+        surface: studio
+        permission: view_job_estimates
+      objects: [jobs.target_job_cost, target_job_cost]
 
 verified_queries:
   occupancy_over_time:
     class: C
-    description: Monthly occupancy for the last 12 months.
+    description: Approved monthly occupancy history for the requested period.
     execution: retrieve_registered_sql
-    sql: external
+    registry_key: harbor.occupancy_over_time
+    tenant_scope: principal
+    semantic_binding: occupancy
+    parameters:
+      months:
+        type: integer
+        default: 12
+        minimum: 1
+        maximum: 60
+    generated_sql_fallback: forbidden
+    on_missing_registry_entry: unavailable
