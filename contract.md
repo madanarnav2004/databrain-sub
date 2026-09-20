@@ -1,88 +1,113 @@
 # Harbor resolver contract
 
-## Request
+## Authority and scope
 
-A request names a model object and optional dimensions or business filters. It never contains a tenant id, tenant slug, schema, or catalog.
+This contract defines the trust boundary and fail-closed behavior for resolving Harbor analytics requests. It is normative for both Studio and the embedded product.
+
+The locked `taxonomy.md` is the authority for business meaning. The locked `model.yaml` is the authority for entities, relationships, measures, semantic bindings, Principal construction, isolation, access, and verified-query dispatch. The runtime may implement those declarations; it may not replace them with tenant-specific logic.
+
+The central rule is:
+
+> Execute SQL only when tenant isolation, authorization, semantic definition, and calculation safety have all been proven. Otherwise return an explicit error and execute no SQL.
+
+## Trust boundary
+
+The user is trusted to state only the business intent, such as “show me occupancy.” Request content is never trusted as evidence of identity, tenant scope, permission, physical namespace, metric definition, or safe query shape.
+
+Authentication creates a **Principal**, which is trusted execution context. A Principal supplies:
+
+- the authenticated actor and surface (`embed` or `studio`);
+- the one tenant scope the actor is authorized to view;
+- the approved row-filter or schema/catalog isolation strategy;
+- permissions;
+- the tenant's assigned semantic profile and business bindings; and
+- any other trusted execution values required by a measure, such as the reporting period for an official snapshot.
+
+The request cannot create, amend, or override any of that context. All request fields remain untrusted and must be validated before planning.
+
+## Request contract
+
+A request names a logical model object and may include supported business dimensions, business filters, or declared parameters. It uses logical names only.
 
 ```json
 {
   "kind": "measure",
   "name": "occupancy",
-  "dimensions": ["property.name"],
+  "dimensions": [],
   "filters": []
 }
 ```
 
-`occupancy` is a business name. The Principal binding selects `official_occupied_units` or `live_occupied_units`; the measure definitions themselves contain no tenant conditionals.
+A request must not contain a tenant selector or physical namespace selector anywhere in its payload. The forbidden selectors declared by the model are:
 
-## Principal
+- `tenant`
+- `tenant_id`
+- `tenant_slug`
+- `schema`
+- `catalog`
+- `database`
 
-A Principal is trusted context created from authentication, not request input. It provides:
+Supplying one is an attempted scope override. The resolver returns `isolated`; it does not ignore the selector, reinterpret it as a business filter, or run SQL.
 
-- the actor and surface (`embed` or `studio`);
-- the tenant scope currently being viewed;
-- the isolation method and value;
-- permissions; and
-- business bindings such as the meaning of `occupancy` and `open_jobs`.
+## Principal construction
 
-There are two Principal factories:
+The runtime constructs the Principal before resolving the request:
 
-- **Embed guest:** verifies Harbor's guest token and creates a Principal fixed to that token's tenant.
-- **Studio:** verifies the Harbor employee's session and creates a Principal for the tenant context the employee is authorized to view.
+- **Embed:** verify the Harbor guest token, derive tenant scope from that token, and load the tenant's assigned semantic profile.
+- **Studio:** verify the Harbor employee session, verify the selected tenant context is authorized for that employee, and load that tenant's assigned semantic profile.
 
-Embed example: the request `{"kind":"measure","name":"occupancy"}` is paired with this Principal and resolves to `live_occupied_units`:
+An unknown actor, invalid session or token, missing tenant scope, or unresolved required binding returns `unauthorized`. No warehouse SQL runs.
 
-```yaml
-actor: cedar_owner_guest
-surface: embed
-tenant_scope: cedar
-isolation: { kind: schema }
-bindings: { occupancy: live_occupied_units, open_jobs: not_yet_invoiced_jobs }
-denied: [jobs.target_job_cost, target_job_cost]
-```
+Studio is another surface over the same Harbor model, not another tenant and not a separate semantic implementation.
 
-Studio example: the same tenant-free request is paired with this Principal and resolves to `official_occupied_units`:
+## Semantic resolution
 
-```yaml
-actor: priya@harbor
-surface: studio
-tenant_scope: northline
-isolation: { kind: row_filter, trusted_tenant: northline }
-bindings: { occupancy: official_occupied_units, open_jobs: harbor_open_jobs }
-denied: []
-```
+Business names are stable. Their implementation is selected from the Principal's data-driven semantic profile:
 
-The Cedar target-cost restriction applies only to its embed Principal. An authorized Studio Principal may use that field.
+| Business request | Northline binding | Cedar binding |
+|---|---|---|
+| `occupancy` | `official_occupied_units` | `live_occupied_units` |
+| `open_jobs` | `harbor_open_jobs` | `not_yet_invoiced_jobs` |
+
+For Northline, occupancy is the signed value in `occupancy_official` for the exact trusted reporting period. It is not reconstructed from the partial unit extract. If exactly one signed row is not available, the result is `unavailable`; there is no prior-period or unit-derived fallback.
+
+For Cedar, occupancy is the current count of rentable units whose status is `occupied`. Common Area is excluded.
+
+The runtime must not contain tenant branches such as `if tenant == "northline"`. It loads `tenant_profile_assignments`, resolves the business name through the assigned profile, and verifies that the resolved measure is one of the business metric's allowed implementations.
+
+The same business name and tenant semantic profile must resolve to the same measure in Studio and embed. An explicit surface-specific access rule may still deny execution.
 
 ## Isolation
 
-- **Row filter:** the Principal supplies a trusted tenant. The resolver uses the model relationships to enforce that tenant on every applicable source; it does not assume every table has the same tenant column. This is how the SQLite seed represents both tenants.
-- **Schema/catalog rewrite:** the Principal supplies an approved physical namespace mapping. The resolver rewrites model sources through that mapping; the request cannot name or override a schema or catalog. Cedar production uses this form.
+Tenant scope always comes from the Principal and must be enforceable for every source used by a plan.
 
-Any tenant id, slug, schema, or catalog found in a request is rejected rather than treated as a normal filter.
+- **Row filter:** start at the trusted Principal tenant and apply the model-declared `entity.tenant_scope` relationship path. Do not assume every entity carries a tenant column.
+- **Schema/catalog rewrite:** resolve logical model sources through the Principal's approved namespace map. A plan contains logical sources only.
 
-## Checks before SQL
+Only relationships listed in `model.yaml` may be planned. Missing scope returns `unauthorized`. A request scope override, a source with no provable path to the Principal tenant, or an unenforceable namespace boundary returns `isolated`. These failures execute no SQL.
 
-1. Build and authenticate the Principal. Reject an unknown actor or missing tenant scope.
-2. Reject tenant or physical-namespace selectors in the request.
-3. Resolve business names through the Principal's bindings.
-4. Check access to every requested measure, field, dimension, filter, and verified query.
-5. Apply the Principal's row filter or schema/catalog rewrite.
-6. Validate that requested joins preserve each measure's grain. For example, in-place rent cannot traverse from units to leases.
-7. Compile ordinary measures, or dispatch a verified query from the registry.
+## Authorization
 
-SQL runs only after all checks pass. Failures return an error and no query is executed.
+Access is deny by default, and an explicit deny takes precedence over an allow. The resolver checks every requested or transitively required measure, field, dimension, filter, relationship, and verified query.
 
-## Errors
+An inaccessible object returns `denied`. It must not be hidden, dropped from the result, replaced with `null`, or returned as zero.
 
-| Error | Meaning |
-|---|---|
-| `denied` | The Principal is valid, but it cannot access the requested object or field. |
-| `isolated` | The request tries to choose another tenant or namespace, or the tenant boundary cannot be enforced safely. |
-| `unauthorized` | The actor, session, guest token, or required tenant scope is not valid. |
-| `grain` | A requested join or grouping would change a measure's defined grain and risk a wrong result. |
+In particular, a Cedar embed Principal cannot access `jobs.target_job_cost` or `target_job_cost`. The model separately declares an allow for a Studio Principal carrying `view_job_estimates`; the Studio surface alone is not itself an access rule.
+
+## Calculation and grain safety
+
+Each measure is calculated only from its declared entity, aggregate, field, filters, and allowed relationships. The resolver must preserve its declared grain.
+
+- `in_place_rent` sums `units.market_rent` once per rentable unit. Vacant rentable units remain included and Common Area is excluded. A units-to-leases fanout is forbidden.
+- `live_occupancy_rate` is `safe_divide(live_occupied_units, rentable_units)`; a zero denominator produces `null` as declared by the measure.
+- `official_occupied_units` stays at tenant-reporting-period grain and cannot be grouped by property, unit, or lease.
+- Reverse relationship traversal is allowed only when the measure explicitly allowlists it. Unlisted relationships are never inferred.
+
+If a join, grouping, or traversal could change the declared grain or double-count a measure, the resolver returns `grain` and executes no SQL. It must not attempt to repair an unsafe plan with an unproven `DISTINCT`, deduplication, or alternate join.
 
 ## Verified occupancy history
+
+Historical occupancy is a Class C operation, not generated SQL:
 
 ```json
 {
@@ -92,4 +117,45 @@ SQL runs only after all checks pass. Failures return an error and no query is ex
 }
 ```
 
-The resolver authorizes the request, applies the Principal context, and retrieves `occupancy_over_time` from the verified-query registry in `model.yaml`. It does not generate a date spine or invent replacement SQL.
+After the normal Principal, isolation, access, and parameter checks, the resolver retrieves registry key `harbor.occupancy_over_time`. The registered query receives tenant scope from the Principal and uses the Principal's `occupancy` semantic binding.
+
+`months` defaults to 12 and must be an integer from 1 through 60. The runtime must not invent a date spine, compose replacement history SQL, or silently switch occupancy definitions. A missing registry entry returns `unavailable` and executes no SQL.
+
+## Mandatory pre-execution gate
+
+The resolver performs these checks in order before any warehouse call:
+
+1. Authenticate the actor and construct a complete Principal.
+2. Reject request-supplied tenant or namespace selectors.
+3. Resolve the requested logical object and business binding from the Principal's semantic profile.
+4. Authorize every requested and required object, including verified queries.
+5. Prove tenant isolation for every source in the plan.
+6. Prove that every relationship, grouping, filter, and aggregate preserves the declared measure grain.
+7. Either compile the declared ordinary measure or retrieve the declared verified query.
+
+SQL execution is permitted only after all seven checks succeed. A failure is terminal for the request: return one explicit error, return no data rows, and make no warehouse call. The resolver must not run a partial plan to see what happens.
+
+## Failure contract
+
+| Error | Required meaning |
+|---|---|
+| `unauthorized` | Authentication, required tenant scope, or a required semantic binding is missing or invalid. |
+| `isolated` | The request attempts to choose scope, or the resolver cannot prove the tenant boundary for the complete plan. |
+| `denied` | The Principal is valid but lacks access to a requested or required object. |
+| `grain` | The requested query shape can change the declared measure grain or produce an unsafe calculation. |
+| `unavailable` | A required trusted value or approved registered query is absent; no allowed fallback exists. |
+
+Errors are observable product outcomes, not empty analytics results. None of these errors may be converted to zero, an empty result set, a hidden column, a substituted definition, or best-effort SQL.
+
+## Conformance examples
+
+| Scenario | Required outcome |
+|---|---|
+| Northline requests `occupancy` with a valid reporting period | Read the one signed `official_occupied_units` value for that exact period. |
+| Cedar requests `occupancy` | Count live occupied rentable units. |
+| A request supplies `tenant_slug: cedar` | `isolated`; no SQL. |
+| A Cedar embed guest requests `target_job_cost` | `denied`; no SQL. |
+| An unknown guest requests any measure | `unauthorized`; no SQL. |
+| In-place rent requires a units-to-leases fanout | `grain`; no SQL. |
+| Occupancy history is requested and the registry entry exists | Execute the approved registered query under the Principal context. |
+| Occupancy history is requested and the registry entry is absent | `unavailable`; no generated fallback SQL. |
