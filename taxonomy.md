@@ -1,55 +1,56 @@
-# Harbor semantic-layer business taxonomy
+# Harbor business taxonomy
 
 ## Nouns
 
 | Scope | Business object | Meaning |
 |---|---|---|
-| Shared | **Principal** | The person or service asking for data: a tenant's embed guest or a Harbor employee in Studio. |
-| Shared | **Tenant** | A Harbor customer such as Northline or Cedar. |
-| Shared | **Property** | A managed building/site. Both `is_active` and `active` are meaningful eligibility flags. |
-| Shared | **Unit** | A rentable space and the grain of rent. Common Area is not a unit for rent or occupancy. |
-| Shared | **Lease** | A unit agreement with current and historical records. Joining leases must not multiply unit-grain rent. |
-| Shared | **Job / work order** | Property work moving through stage, status, activity, and invoicing. |
-| Shared | **Invoice / job cost** | An actual cost record. An approved invoice is spend; target job cost is only an estimate. |
-| Shared record, local authority | **Official occupancy snapshot / admin pack** | A signed monthly record. It is Northline's reporting authority, but Cedar retains it only for audit. |
-| Tenant binding — Northline | **Official occupancy** | Occupied units from the signed snapshot; the partial unit extract is not a substitute. |
-| Tenant binding — Cedar | **Live occupancy** | Current occupied rentable units; the lagging official snapshot is not a substitute. |
-| Harbor product | **Open-jobs definition** | Harbor's named filter bundle. Cedar's “not yet invoiced” jobs are a second definition, not an override. |
+| Shared | **Principal** | Whoever is asking for data: an embed guest or a Harbor employee using Studio. |
+| Shared | **Tenant** | A Harbor customer, such as Northline or Cedar. |
+| Shared | **Property** | A managed building or site. Both `is_active` and `active` matter when deciding whether it should be included. |
+| Shared | **Unit** | A rentable space. This is also the grain for rent. Common Area does not count as a unit here. |
+| Shared | **Lease** | A current or historical agreement for a unit. There can be more than one lease row for a unit. |
+| Shared | **Job / work order** | Work on a property, with a stage, status and activity state. |
+| Shared | **Invoice / job cost** | The actual cost record. An approved invoice is spend; target job cost is an estimate. |
+| Shared record, tenant-specific use | **Official occupancy snapshot / admin pack** | The signed monthly record. Northline reports from it; Cedar keeps it for audit but does not use it as current occupancy. |
+| Northline-specific binding | **Official occupancy** | The occupied-unit value in the signed snapshot. The partial unit extract cannot replace it. |
+| Cedar-specific binding | **Live occupancy** | The current count of occupied rentable units. Cedar does not use the delayed admin number for this. |
+| Harbor definition | **Open jobs** | Harbor's full job filter. Cedar's “not yet invoiced” meaning is a different definition, not an edit to this one. |
 
-Harbor is the vendor; Northline and Cedar are tenants; Studio is Harbor's internal surface.
+Harbor is the vendor. Northline and Cedar are tenants. Studio is Harbor's internal surface, not another tenant or another model.
 
 ## Business actions
 
-- An administrator **publishes/signs** an official occupancy snapshot. If Northline's file is late, the owner meeting moves; the product does not recompute or carry forward a value.
-- Northline **reports** official occupancy; Cedar **reports** live occupancy from rentable units whose status is occupied.
-- A lease **becomes current or historical**.
-- Historical occupancy is **retrieved** through a verified query rather than reconstructed ad hoc.
-- A unit is **included in the rent book** when rentable, whether occupied or vacant. Rent is totaled at unit level.
-- A Harbor job **counts as open** only when its stage is not Cancelled/Closed, status is not Rejected, the job is active, and both property activity flags are true.
-- A Cedar job **counts as not yet invoiced** until it has an approved invoice, regardless of Harbor stage.
-- An invoice is **approved** and then contributes to approved invoice spend; an estimate never substitutes for spend.
-- Embed guests **view** only their tenant's data; Cedar embed guests cannot view target job cost.
+- The administrator **publishes** the official occupancy snapshot. If Northline's file is late, the meeting moves. We should not calculate a replacement or copy last month's value.
+- Northline **reports** the official number. Cedar **reports** the current count of rentable units marked occupied.
+- A lease **moves** between current and historical states.
+- For occupancy over time, the runtime **retrieves** the existing verified query. It should not make up a date spine.
+- A rentable unit **contributes** its market rent whether it is occupied or vacant. The total stays at unit grain.
+- A Harbor job **counts as open** only after all stage, status, job activity and property activity checks pass.
+- A Cedar job **counts as not yet invoiced** until it has an approved invoice, even if Harbor calls the job closed.
+- Once an invoice is **approved**, it contributes to actual spend. The target cost is still only an estimate.
+- Embed guests **see** only their tenant's data. Cedar embed guests must not see target job cost.
 
 ## Metric classes
 
 | Class | Metric/object | Product meaning |
 |---|---|---|
-| A | `in_place_rent` | Sum rentable `unit.market_rent` at unit grain; vacant units included and Common Area excluded. |
-| A | `live_occupied_units` | Count rentable occupied units using the current/live state. Separate from official occupancy. |
+| A | `in_place_rent` | Sum `unit.market_rent` for rentable units. Vacant units stay in; Common Area stays out. |
+| A | `rentable_units` | Count rentable units, excluding Common Area. This is the denominator for the live rate. |
+| A | `live_occupied_units` | Count rentable units currently marked occupied. This is separate from the official snapshot. |
 | A | `vacant_units` | Count rentable vacant units. |
-| A | `harbor_open_jobs` | Count jobs satisfying the complete Harbor stage/status/job/property filter bundle. |
-| A | `not_yet_invoiced_jobs` | Count jobs without an approved invoice; Cedar's separate business meaning. |
-| A | `approved_invoice_spend` | Sum approved Invoice job costs, not target estimates. |
-| A | `target_job_cost` | Sum of estimates where authorized; denied to the Cedar embed Principal. |
-| B | `occupancy_rate` | Occupied divided by the matching rentable denominator. Cedar can use live inventory; Northline's portfolio count must not be mixed with the partial extract. |
-| C | `occupancy_over_time` | Stored verified query for monthly history. Retrieve it; do not invent a date spine, window, or multi-CTE query. |
-| D | `official_occupancy_snapshot` | Select the signed warehouse/file value. Never re-derive it from the unit extract. |
+| A | `harbor_open_jobs` | Count jobs only when the complete Harbor filter passes. |
+| A | `not_yet_invoiced_jobs` | Count jobs that do not yet have an approved invoice. This is Cedar's separate meaning of “open.” |
+| A | `approved_invoice_spend` | Sum approved invoice costs, not target estimates. |
+| A | `target_job_cost` | Sum job estimates where access allows it. Cedar embed guests are denied. |
+| B | `live_occupancy_rate` | `live_occupied_units / rentable_units`. This works for Cedar. I would not combine Northline's official portfolio number with a denominator from the partial unit extract. |
+| C | `occupancy_over_time` | Use the stored verified query for monthly history. The runtime should not generate a replacement query. |
+| D | `official_occupied_units` | Read the latest signed value from `occupancy_official`; do not rebuild it from units. |
 
 ## Inbound requests
 
 | Request | Decision | Why |
 |---|---|---|
-| R1 — hardcoded five-day overdue SLA | **Paid exception / time-boxed hack** | Five days is Northline policy, not a Harbor invariant; a future product primitive would require a configurable SLA rather than a baked-in constant. |
-| R2 — occupied, vacant, occupancy rate | **Primitive** | These reusable A/A/B measures belong in the layer; the rate must use the matching occupancy meaning and denominator. |
-| R3 — resolved-result CSV download | **Reusable product capability** | Exporting an authorized result is useful across embed and Studio, but it is not a semantic primitive. |
-| R4 — email VP and draft owner note on a 2% move | **No** | Email alerts and drafted communications are workflow features, not business definitions in the semantic layer. |
+| R1 — hardcoded five-day overdue SLA | **Paid exception / time-boxed hack** | Five days is Northline's policy, not a Harbor rule. I would only ship it temporarily; the reusable version needs a configurable SLA. |
+| R2 — occupied, vacant, occupancy rate | **Primitive** | The counts and rate are useful for future tenants too. The rate must use an occupancy definition and denominator that refer to the same population. |
+| R3 — resolved-result CSV download | **Primitive** | CSV export is reusable across tenants and Studio. It should export the result after the normal resolution and access checks, not resolve the data again. |
+| R4 — email VP and draft owner note on a 2% move | **No** | This sends something outside the product, but nobody has defined approval, recipients, duplicate suppression or an audit trail. I would not promise it on tomorrow's call. |
